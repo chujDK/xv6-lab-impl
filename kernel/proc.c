@@ -144,6 +144,19 @@ found:
   return p;
 }
 
+uint64
+get_sys_nproc()
+{
+  uint64 count = 0;
+  struct proc *p;
+  for(p = proc; p < &proc[NPROC]; p++) {
+    if(p->state != UNUSED) {
+      count++;
+    }
+  }
+  return count;
+}
+
 // free a proc structure and the data hanging from it,
 // including user pages.
 // p->lock must be held.
