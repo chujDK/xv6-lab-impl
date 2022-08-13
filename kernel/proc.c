@@ -127,6 +127,18 @@ found:
     return 0;
   }
 
+#ifdef LAB_PGTBL
+  // Allocate a usyscall page.
+  if((p->usyscall = (struct usyscall *)kalloc()) == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+
+  p->usyscall->pid = p->pid;
+#endif
+
+
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
   if(p->pagetable == 0){
@@ -153,6 +165,11 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
+#ifdef LAB_PGTBL
+  if (p->usyscall)
+    kfree((void *)p->usyscall);
+  p->usyscall = 0;
+#endif
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
@@ -196,6 +213,17 @@ proc_pagetable(struct proc *p)
     return 0;
   }
 
+#ifdef LAB_PGTBL
+  // map the usyscall just below TRAPFRAME, for speeding up syscall.
+  if (mappages(pagetable, USYSCALL, PGSIZE,
+               (uint64)(p->usyscall), PTE_U | PTE_R) < 0) {
+    uvmunmap(pagetable, TRAMPOLINE, 1, 0);
+    uvmunmap(pagetable, TRAPFRAME, 1, 0);
+    uvmfree(pagetable, 0);
+    return 0;
+  }
+#endif
+
   return pagetable;
 }
 
@@ -206,6 +234,9 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
 {
   uvmunmap(pagetable, TRAMPOLINE, 1, 0);
   uvmunmap(pagetable, TRAPFRAME, 1, 0);
+#ifdef LAB_PGTBL
+  uvmunmap(pagetable, USYSCALL, 1, 0);
+#endif
   uvmfree(pagetable, sz);
 }
 
