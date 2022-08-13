@@ -434,26 +434,63 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 }
 
 #ifdef LAB_PGTBL
+static void vmprint_flag(pte_t flag)
+{
+#ifdef VMPRINT_DEBUG
+  printf("\t");
+  if(flag & PTE_R)
+    printf("R");
+  else
+    printf("-");
+  if(flag & PTE_W)
+    printf("W");
+  else
+    printf("-");
+  if(flag & PTE_X)
+    printf("X");
+  else
+    printf("-");
+  if(flag & PTE_U)
+    printf("U");
+  else
+    printf("-");
+  if(flag & PTE_A)
+    printf("A");
+  else
+    printf("-");
+  if(flag & PTE_V)
+    printf("V");
+  else
+    printf("-");
+#endif
+
+  printf("\n");
+}
+
 void vmprint(pagetable_t pagetable)
 {
-  printf("page table %p\n", pagetable);
+  printf("page table %p", pagetable);
+  vmprint_flag((pte_t)pagetable);
   // lev.1
   for (int i = 0; i < 512; i++) {
     if (pagetable[i] & PTE_V) {
       pagetable_t pagetable_l2 = (pagetable_t)PTE2PA(pagetable[i]);
-      printf("..%d: pte %p pa %p\n", i, pagetable[i], pagetable_l2);
+      printf("..%d: pte %p pa %p", i, pagetable[i], pagetable_l2);
+      vmprint_flag((pte_t)pagetable[i]);
 
       // lev.2
       for (int j = 0; j < 512; j++) {
         if (pagetable_l2[j] & PTE_V) {
           pagetable_t pagetable_l3 = (pagetable_t)PTE2PA(pagetable_l2[j]);
-          printf(".. ..%d: pte %p pa %p\n", j, pagetable_l2[j], pagetable_l3);
+          printf(".. ..%d: pte %p pa %p", j, pagetable_l2[j], pagetable_l3);
+          vmprint_flag((pte_t)pagetable_l2[j]);
 
           // lev.3
           for (int k = 0; k < 512; k++) {
             if (pagetable_l3[k] & PTE_V) {
-              printf(".. .. ..%d: pte %p pa %p\n", k, pagetable_l3[k], 
+              printf(".. .. ..%d: pte %p pa %p", k, pagetable_l3[k], 
                      PTE2PA(pagetable_l3[k]));
+              vmprint_flag((pte_t)pagetable_l3[k]);
             }
           }
         }

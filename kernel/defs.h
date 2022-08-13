@@ -172,6 +172,7 @@ int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
 #ifdef LAB_PGTBL
 void            vmprint(pagetable_t);
+pte_t*          walk(pagetable_t, uint64, int);
 #endif
 
 // plic.c
