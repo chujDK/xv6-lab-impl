@@ -132,3 +132,17 @@ printfinit(void)
   initlock(&pr.lock, "pr");
   pr.locking = 1;
 }
+
+void
+backtrace(void)
+{
+  uint64* fp = (uint64*)r_fp();
+
+  uint64 kstack_top    = PGROUNDUP((uint64)fp);
+  uint64 kstack_bottom = PGROUNDDOWN((uint64)fp);
+
+  while (*(fp - 2) <= kstack_top && *(fp - 2) > kstack_bottom) {
+    printf("%p\n", *(fp - 1));
+    fp = (uint64*) *(fp - 2);
+  }
+}
