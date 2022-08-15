@@ -77,8 +77,27 @@ usertrap(void)
     exit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
+  if(which_dev == 2){
+    if(p->alarm_ticks != 0){
+      if(p->ticks_passed == 0){
+        // reset the alarm
+        p->ticks_passed = p->alarm_ticks - 1;
+        // call the alarm function.
+        if (p->in_sighandler == 0) {
+          // backup the trapframe
+          memmove(&p->alarm_frame, p->trapframe, sizeof(struct trapframe));
+          // invoke this function when return to the user program 
+          // by setting the sepc register.
+          p->trapframe->epc = (uint64)p->alarm_handler;
+          p->in_sighandler = 1;
+          usertrapret();
+        }
+      } else {
+        p->ticks_passed--;
+      }
+    }
     yield();
+  }
 
   usertrapret();
 }
