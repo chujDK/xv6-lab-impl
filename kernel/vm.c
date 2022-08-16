@@ -291,6 +291,71 @@ uvmfree(pagetable_t pagetable, uint64 sz)
   freewalk(pagetable);
 }
 
+static void vmprint_flag(pte_t flag)
+{
+#define VMPRINT_DEBUG
+#ifdef VMPRINT_DEBUG
+  printf("\t");
+  if(flag & PTE_R)
+    printf("R");
+  else
+    printf("-");
+  if(flag & PTE_W)
+    printf("W");
+  else
+    printf("-");
+  if(flag & PTE_X)
+    printf("X");
+  else
+    printf("-");
+  if(flag & PTE_U)
+    printf("U");
+  else
+    printf("-");
+  if(flag & PTE_INCOW)
+    printf("C");
+  else
+    printf("-");
+  if(flag & PTE_V)
+    printf("V");
+  else
+    printf("-");
+#endif
+
+  printf("\n");
+}
+
+void vmprint(pagetable_t pagetable)
+{
+  printf("page table %p\n", pagetable);
+  // lev.1
+  for (int i = 0; i < 512; i++) {
+    if (pagetable[i] & PTE_V) {
+      pagetable_t pagetable_l2 = (pagetable_t)PTE2PA(pagetable[i]);
+      printf("..%d: pte %p pa %p", i, pagetable[i], pagetable_l2);
+      vmprint_flag((pte_t)pagetable[i]);
+
+      // lev.2
+      for (int j = 0; j < 512; j++) {
+        if (pagetable_l2[j] & PTE_V) {
+          pagetable_t pagetable_l3 = (pagetable_t)PTE2PA(pagetable_l2[j]);
+          printf(".. ..%d: pte %p pa %p", j, pagetable_l2[j], pagetable_l3);
+          vmprint_flag((pte_t)pagetable_l2[j]);
+
+          // lev.3
+          for (int k = 0; k < 512; k++) {
+            if (pagetable_l3[k] & PTE_V) {
+              printf(".. .. ..%d: pte %p pa %p", k, pagetable_l3[k], 
+                     PTE2PA(pagetable_l3[k]));
+              vmprint_flag((pte_t)pagetable_l3[k]);
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 // Given a parent process's page table, copy
 // its memory into a child's page table.
 // Copies both the page table and the
@@ -303,7 +368,6 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -312,14 +376,24 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
-      goto err;
+    if(((flags & PTE_INCOW) != 0) || ((flags & PTE_W) != 0)){
+      // mark both page as copy-on-write
+      inc_cow_page_ref_count(pa);
+      uint flags_cow = (flags | PTE_INCOW) & (~PTE_W);
+      if(mappages(new, i, PGSIZE, (uint64)pa, flags_cow) != 0){
+        dec_cow_page_ref_count(pa);
+        goto err;
+      }
+      *pte |= PTE_INCOW;
+      *pte &= ~PTE_W;
+    } else if((flags & PTE_W) == 0){
+      // unwriteable page. remap it.
+      if(mappages(new, i, PGSIZE, (uint64)pa, flags) != 0){
+        goto err;
+      }
     }
   }
+
   return 0;
 
  err:
@@ -347,12 +421,31 @@ int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
+  pte_t* pa0_pte;
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
-    pa0 = walkaddr(pagetable, va0);
+
+    // here handle the cow case. i do think handle the cow here is not elegant.
+    // instead, handle it in the kerneltrap maybe better. 
+    // however, handle here can reduce a trap. faster.
+    if(va0 >= MAXVA)
+      return -1;
+    pa0_pte = walk(pagetable, va0, 0);
+    if(pa0_pte == 0)
+      return -1;
+    pa0 = PTE2PA(*pa0_pte);
     if(pa0 == 0)
       return -1;
+    if(*pa0_pte & PTE_INCOW){
+      char* new_page = kalloc();
+      uint new_flags = (PTE_FLAGS(*pa0_pte) & (~PTE_INCOW)) | PTE_W;
+      memmove(new_page, (char*)pa0, PGSIZE);
+      uvmunmap(pagetable, va0, 1, 1);
+      mappages(
+        pagetable, va0, PGSIZE, (uint64)new_page, new_flags);
+      pa0 = (uint64)new_page;
+    }
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;

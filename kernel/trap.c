@@ -49,8 +49,10 @@ usertrap(void)
   
   // save user program counter.
   p->trapframe->epc = r_sepc();
+
+  uint64 scause = r_scause();
   
-  if(r_scause() == 8){
+  if(scause == 8){
     // system call
 
     if(p->killed)
@@ -65,6 +67,42 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if(scause == 15){
+    // Store/AMO page fault
+
+    // this may caused by copy-on-write, check the pte's flag and handle it
+    uint64 cow_page_va = PGROUNDDOWN(r_stval());
+    if (cow_page_va >= MAXVA){
+      printf("usertrap: page fault at %p, virtual address exceed pid=%d\n",
+              cow_page_va, p->pid);
+      p->killed = 1;
+    } else{
+      pagetable_t user_pagetable = p->pagetable;
+      pte_t* page_pte = walk(user_pagetable, cow_page_va, 0);
+      if (page_pte == 0){
+        // unlikely
+        panic("usertrap: can't find page table entry");
+      }
+
+      if(*page_pte & PTE_INCOW){
+        // caused by COW, alloc a new page
+        char* new_page = kalloc();
+        if (new_page == 0){
+          printf("usertrap: no memory for cow page, pid=%d\n", p->pid);
+          p->killed = 1;
+        } else{
+        uint new_flags = (PTE_FLAGS(*page_pte) & (~PTE_INCOW)) | PTE_W;
+        uint64 cow_page_pa = PTE2PA(*page_pte);
+        memmove(new_page, (char*)cow_page_pa, PGSIZE);
+        uvmunmap(user_pagetable, cow_page_va, 1, 1);
+        mappages(
+          user_pagetable, cow_page_va, PGSIZE, (uint64)new_page, new_flags);
+        }
+      } else{
+        printf("usertrap: page fault at %p pid=%d\n", cow_page_va, p->pid);
+        p->killed = 1;
+      }
+    }
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {

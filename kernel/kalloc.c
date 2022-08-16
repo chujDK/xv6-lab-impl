@@ -23,6 +23,24 @@ struct {
   struct run *freelist;
 } kmem;
 
+// ref count to support copy-on-write
+#define PHY_RAM_SIZE (PHYSTOP - KERNBASE)
+#define PHY_PAGE_SUM (PHY_RAM_SIZE / PGSIZE)
+int page_ref_count[PHY_PAGE_SUM] = {[0 ... (PHY_PAGE_SUM - 1)] = 1};
+#define PHYADDR2PAGERCIDX(x) ((PGROUNDDOWN((((uint64)x) - KERNBASE))) / PGSIZE)
+
+void inc_cow_page_ref_count(uint64 pa) { 
+  page_ref_count[PHYADDR2PAGERCIDX(pa)]++; 
+}
+
+void dec_cow_page_ref_count(uint64 pa) {
+  page_ref_count[PHYADDR2PAGERCIDX(pa)]--;
+}
+
+int get_cow_page_ref_count(uint64 pa) { 
+  return page_ref_count[PHYADDR2PAGERCIDX(pa)];
+}
+
 void
 kinit()
 {
@@ -51,6 +69,15 @@ kfree(void *pa)
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
 
+  dec_cow_page_ref_count((uint64)pa);
+  if (get_cow_page_ref_count((uint64)pa) < 0) {
+    printf("kfree: page ref count < 0, page %p\n", pa);
+    panic("kfree");
+  }
+  if (get_cow_page_ref_count((uint64)pa) != 0) {
+    return;
+  }
+
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
 
@@ -78,5 +105,14 @@ kalloc(void)
 
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
+
+  // set the refcount
+  if (r) {
+    if (get_cow_page_ref_count((uint64)r) != 0) {
+      printf("kalloc: page %p cow ref count is not 0\n", r);
+      panic("kalloc");
+    }
+    inc_cow_page_ref_count((uint64)r);
+  }
   return (void*)r;
 }
