@@ -36,6 +36,8 @@ insert(int key, int value, struct entry **p, struct entry *n)
   *p = e;
 }
 
+pthread_mutex_t hash_put_mutex;
+
 static 
 void put(int key, int value)
 {
@@ -52,7 +54,9 @@ void put(int key, int value)
     e->value = value;
   } else {
     // the new is new.
+    pthread_mutex_lock(&hash_put_mutex);
     insert(key, value, &table[i], table[i]);
+    pthread_mutex_unlock(&hash_put_mutex);
   }
 
 }
@@ -105,6 +109,7 @@ main(int argc, char *argv[])
   void *value;
   double t1, t0;
 
+  pthread_mutex_init(&hash_put_mutex, NULL);
 
   if (argc < 2) {
     fprintf(stderr, "Usage: %s nthreads\n", argv[0]);
