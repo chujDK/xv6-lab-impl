@@ -1,0 +1,3 @@
+-I.
+-nostdlib
+-DLAB_LOCK
