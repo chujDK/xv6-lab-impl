@@ -23,14 +23,23 @@
 #include "fs.h"
 #include "buf.h"
 
+#define BHASHSIZE 13
+struct bhashtbl {
+  struct spinlock lock;
+  struct buf head;
+};
+
+static
+int hash(uint dev, uint blockno)
+{
+  return (((uint64)dev << 32) | (uint64) blockno) % BHASHSIZE;
+}
+
 struct {
   struct spinlock lock;
   struct buf buf[NBUF];
 
-  // Linked list of all buffers, through prev/next.
-  // Sorted by how recently the buffer was used.
-  // head.next is most recent, head.prev is least.
-  struct buf head;
+  struct bhashtbl hash[BHASHSIZE];
 } bcache;
 
 void
@@ -40,15 +49,19 @@ binit(void)
 
   initlock(&bcache.lock, "bcache");
 
-  // Create linked list of buffers
-  bcache.head.prev = &bcache.head;
-  bcache.head.next = &bcache.head;
+  for(int i = 0; i < BHASHSIZE; i++){
+    initlock(&bcache.hash[i].lock, "bcache_bhashtbl");
+    bcache.hash[i].head.prev = &bcache.hash[i].head;
+    bcache.hash[i].head.next = &bcache.hash[i].head;
+  }
+
+  // add all buffers to hash[0]
   for(b = bcache.buf; b < bcache.buf+NBUF; b++){
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
+    b->next = bcache.hash[0].head.next;
+    b->prev = &bcache.hash[0].head;
     initsleeplock(&b->lock, "buffer");
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
+    bcache.hash[0].head.next->prev = b;
+    bcache.hash[0].head.next = b;
   }
 }
 
@@ -60,32 +73,64 @@ bget(uint dev, uint blockno)
 {
   struct buf *b;
 
-  acquire(&bcache.lock);
+  int hashid = hash(dev, blockno);
+  struct bhashtbl* bucket = &bcache.hash[hashid];
+  acquire(&bucket->lock);
 
-  // Is the block already cached?
-  for(b = bcache.head.next; b != &bcache.head; b = b->next){
+  for(b = bucket->head.next; b != &bucket->head; b = b->next){
     if(b->dev == dev && b->blockno == blockno){
       b->refcnt++;
-      release(&bcache.lock);
+      release(&bucket->lock);
       acquiresleep(&b->lock);
       return b;
+    }
+  }
+  release(&bucket->lock);
+
+  acquire(&bcache.lock);
+
+  // Not cached.
+  // Recycle all hashtbl and get the least recent buf
+  uint least_recent_time_stamp = 0;
+  least_recent_time_stamp--;
+  struct buf* least_recent_buf = 0;
+  for(int hidx = 0; hidx < BHASHSIZE; hidx++){
+    acquire(&bcache.hash[hidx].lock);
+    for(b = bcache.hash[hidx].head.prev; b != &bcache.hash[hidx].head; b = b->prev){
+      if(b->refcnt == 0){
+        if(b->timestamp <= least_recent_time_stamp){
+          least_recent_buf = b;
+          least_recent_time_stamp = b->timestamp;
+        }
+      }
     }
   }
 
-  // Not cached.
-  // Recycle the least recently used (LRU) unused buffer.
-  for(b = bcache.head.prev; b != &bcache.head; b = b->prev){
-    if(b->refcnt == 0) {
-      b->dev = dev;
-      b->blockno = blockno;
-      b->valid = 0;
-      b->refcnt = 1;
-      release(&bcache.lock);
-      acquiresleep(&b->lock);
-      return b;
-    }
+  if(least_recent_buf == 0){
+    panic("bget: no buffers");
   }
-  panic("bget: no buffers");
+
+  b = least_recent_buf;
+  b->dev = dev;
+  b->blockno = blockno;
+  b->valid = 0;
+  b->refcnt = 1;
+  // unlink
+  b->next->prev = b->prev;
+  b->prev->next = b->next;
+
+  // link
+  b->next = bucket->head.next;
+  b->prev = &bucket->head;
+  bucket->head.next->prev = b;
+  bucket->head.next = b;
+  for(int hidx = 0; hidx < BHASHSIZE; hidx++){
+    release(&bcache.hash[hidx].lock);
+  }
+
+  release(&bcache.lock);
+  acquiresleep(&b->lock);
+  return b;
 }
 
 // Return a locked buf with the contents of the indicated block.
@@ -121,19 +166,18 @@ brelse(struct buf *b)
 
   releasesleep(&b->lock);
 
-  acquire(&bcache.lock);
+  int hashid = hash(b->dev, b->blockno);
+  struct bhashtbl* bucket = &bcache.hash[hashid];
+  acquire(&bucket->lock);
+
   b->refcnt--;
   if (b->refcnt == 0) {
     // no one is waiting for it.
-    b->next->prev = b->prev;
-    b->prev->next = b->next;
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
+    // update timestamp
+    b->timestamp = ticks;
   }
   
-  release(&bcache.lock);
+  release(&bucket->lock);
 }
 
 void
