@@ -252,7 +252,7 @@ create(char *path, short type, short major, short minor)
   if((ip = dirlookup(dp, name, 0)) != 0){
     iunlockput(dp);
     ilock(ip);
-    if(type == T_FILE && (ip->type == T_FILE || ip->type == T_DEVICE))
+    if(type == T_FILE && (ip->type == T_FILE || ip->type == T_DEVICE || ip->type == T_SYMLINK))
       return ip;
     iunlockput(ip);
     return 0;
@@ -283,6 +283,29 @@ create(char *path, short type, short major, short minor)
   return ip;
 }
 
+static struct inode* 
+symlink_recursively_lookup(struct inode* ip, const char* original_path){
+  static char tmp_path[MAXPATH];
+  struct inode* tmp_ip;
+  readi(ip, 0, (uint64)tmp_path, 0, MAXPATH);
+  if(strncmp(tmp_path, original_path, MAXPATH) == 0){
+    iunlockput(ip);
+    return 0;
+  }
+  iunlockput(ip);
+  tmp_ip = namei(tmp_path);
+  if(tmp_ip == 0){
+    return 0;
+  } 
+
+  ilock(tmp_ip);
+  if(tmp_ip->type == T_SYMLINK){
+    return symlink_recursively_lookup(tmp_ip, original_path);
+  } else {
+    return tmp_ip;
+  }
+}
+
 uint64
 sys_open(void)
 {
@@ -311,6 +334,14 @@ sys_open(void)
     ilock(ip);
     if(ip->type == T_DIR && omode != O_RDONLY){
       iunlockput(ip);
+      end_op();
+      return -1;
+    }
+  }
+
+  if(ip->type == T_SYMLINK && !(omode & O_NOFOLLOW)){
+    ip = symlink_recursively_lookup(ip, path);
+    if(ip == 0){
       end_op();
       return -1;
     }
@@ -482,5 +513,46 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+uint64
+sys_symlink(void)
+{
+  char target[MAXPATH], path[MAXPATH];
+  int target_len, path_len;
+  struct inode *path_inode;
+
+  if(argstr(0, target, sizeof(target) - 1) < 0 ||
+     argstr(1, path, sizeof(path) - 1) < 0){
+    return -1;
+  }
+
+  target_len = strlen(target);
+  path_len = strlen(path);
+  target[target_len] = '\0';
+  path[path_len] = '\0';
+
+  begin_op();
+
+  // this file has already exist
+  if((path_inode = namei(path)) != 0){
+    iput(path_inode);
+    end_op();
+    return -1;
+  }
+
+  path_inode = create(path, T_FILE, 0, 0);
+  if(path_inode == 0){
+    end_op();
+    return -1;
+  }
+
+  path_inode->type = T_SYMLINK;
+  writei(path_inode, 0, (uint64)target, 0, strlen(target) + 1);
+  iupdate(path_inode);
+  iunlockput(path_inode);
+
+  end_op();
   return 0;
 }
