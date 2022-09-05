@@ -1,3 +1,15 @@
+#define MAX_MMAP_VMA 16
+struct mmapVMA {
+  struct file* file;
+  int writeable;
+  int readable;
+  int shared;
+
+  uint64 vaddr_start;
+  uint64 length;
+  int pid;
+};
+
 struct file {
   enum { FD_NONE, FD_PIPE, FD_INODE, FD_DEVICE } type;
   int ref; // reference count

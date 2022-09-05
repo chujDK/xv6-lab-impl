@@ -1,0 +1,16 @@
+-I.
+-Wall
+-O
+-fno-omit-frame-pointer
+-ggdb
+-DSOL_FS
+-DLAB_FS
+-MD
+-mcmodel=medany
+-ffreestanding
+-fno-common
+-nostdlib
+-mno-relax
+-fno-stack-protector
+-fno-pie
+-no-pie

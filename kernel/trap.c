@@ -5,11 +5,15 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
 
 struct spinlock tickslock;
 uint ticks;
 
 extern char trampoline[], uservec[], userret[];
+extern struct mmapVMA mmapVMAs[MAX_MMAP_VMA];
 
 // in kernelvec.S, calls kerneltrap().
 void kernelvec();
@@ -27,6 +31,71 @@ void
 trapinithart(void)
 {
   w_stvec((uint64)kernelvec);
+}
+
+static void
+alloc_mmaped_page(struct proc* p, int is_write) {
+
+  int in_mmap_addr = 0;
+  struct mmapVMA* mmap_vma = 0;
+  uint64 addr = r_stval();
+
+  for (int i = 0; i < MAX_MMAP_VMA; i++) {
+    if (mmapVMAs[i].pid == p->pid) {
+      if (addr >= mmapVMAs[i].vaddr_start &&
+          addr <= mmapVMAs[i].vaddr_start + mmapVMAs[i].length) {
+        if (is_write && mmapVMAs[i].writeable == 1) {
+          in_mmap_addr = 1;
+          mmap_vma = &mmapVMAs[i];
+          break;
+        }
+        if (!is_write && mmapVMAs[i].readable == 1) {
+          in_mmap_addr = 1;
+          mmap_vma = &mmapVMAs[i];
+          break;
+        }
+      }
+    }
+  }
+
+  if (!in_mmap_addr) {
+    printf("usertrap(): unexpected scause %p pid=%d", r_scause(), p->pid);
+    printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+    p->killed = 1;
+    return;
+  }
+
+  addr = PGROUNDDOWN(addr);
+  // seems the page is not present, allocate a new page
+  pte_t* page_pte = walk(p->pagetable, addr, 0);
+  if (page_pte == 0) {
+    // unlikely
+    panic("usertrap: can't find page table entry");
+  }
+
+  char* new_page = kalloc();
+  if (new_page == 0) {
+    printf("usertrap(): no memory for mmap, pid = %d\n", p->pid);
+    p->killed = 1;
+  } else {
+    uint new_flags = PTE_V | PTE_U;
+    if (mmap_vma->readable) {
+      new_flags |= PTE_R;
+    }
+    if (mmap_vma->writeable) {
+      new_flags |= PTE_W;
+    }
+
+    uint offset = addr - mmap_vma->vaddr_start;
+    struct inode* ip = mmap_vma->file->ip;
+    idup(ip);
+    ilock(ip);
+    uint64 end = readi(ip, 0, (uint64)new_page, offset, PGSIZE);
+    memset(new_page + end, 0, PGSIZE - end);
+    iunlockput(ip);
+    
+    mappages(p->pagetable, addr, PGSIZE, (uint64)new_page, new_flags);
+  }
 }
 
 //
@@ -49,8 +118,10 @@ usertrap(void)
   
   // save user program counter.
   p->trapframe->epc = r_sepc();
-  
-  if(r_scause() == 8){
+
+  uint64 scause = r_scause();
+
+  if(scause == 8){
     // system call
 
     if(p->killed)
@@ -65,6 +136,12 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if(scause == 15) {
+    // Store/AMO page fault
+    alloc_mmaped_page(p, 1);
+  } else if(scause == 13) {
+    // Load page fault
+    alloc_mmaped_page(p, 0);
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {

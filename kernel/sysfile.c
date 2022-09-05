@@ -484,3 +484,110 @@ sys_pipe(void)
   }
   return 0;
 }
+
+struct mmapVMA mmapVMAs[MAX_MMAP_VMA];
+
+uint64
+sys_mmap(void)
+{
+  void* addr;
+  uint64 length, offset;
+  int prot, flags, fd;
+
+  int vma_idx = -1;
+
+  if (argaddr(0, (uint64*)&addr) < 0 ||
+      argaddr(1, &length) < 0 ||
+      argint(2, &prot) < 0 ||
+      argint(3, &flags) < 0 ||
+      argint(4, &fd) < 0 ||
+      argaddr(5, &offset) < 0) {
+    return -1;
+  }
+
+  if (addr != 0 || offset != 0) {
+    printf("mmap: addr and offset not be 0 not supported!\n");
+    return -1;
+  }
+
+  if (fd <= 0) {
+    printf("mmap only support maping files!\n");
+    return -1;
+  }
+
+  if (length == 0) {
+    panic("mmap: length is 0!");
+    return 0;
+  }
+
+  for (int i = 0; i < sizeof(mmapVMAs) / sizeof(struct mmapVMA); i++) {
+    if (mmapVMAs[i].file == 0) {
+      vma_idx = i;
+      break;
+    }
+  }
+
+  if (vma_idx < 0) {
+    panic("mmap: no more vma available!");
+  }
+
+  struct proc* proc = myproc();
+  acquire(&proc->lock);
+  struct file* file = proc->ofile[fd];
+  if (file == 0) {
+    return -1;
+  }
+  filedup(file);
+  release(&proc->lock);
+
+  mmapVMAs[vma_idx].file = file;
+  if (prot & PROT_READ) {
+    mmapVMAs[vma_idx].readable = 1;
+  }
+  if (prot & PROT_WRITE) {
+    mmapVMAs[vma_idx].writeable = 1;
+  }
+  if (flags & MAP_SHARED) {
+    mmapVMAs[vma_idx].shared = 1;
+  }
+
+  acquire(&proc->lock);
+  mmapVMAs[vma_idx].vaddr_start = proc->sz;
+  mmapVMAs[vma_idx].pid = proc->pid;
+  mmapVMAs[vma_idx].length = PGROUNDUP(length);
+  proc->sz = proc->sz + PGROUNDUP(length);
+  release(&proc->lock);
+
+/*
+  for (int a = mmapVMAs[vma_idx].vaddr_start; a < proc->sz; a += PGSIZE) {
+    if ((pte = walk(proc->pagetable, a, 1)) == 0) {
+      for (int failaddr = a;
+           a >= mmapVMAs[vma_idx].vaddr_start;
+           a -= PGSIZE) {
+        pte = walk(proc->pagetable, failaddr, 0);
+        *pte = 0;
+      }
+      return -1;
+    }
+    if (*pte & PTE_V) {
+      panic("mmap: page already exists!");
+    }
+  }
+  */
+
+  return mmapVMAs[vma_idx].vaddr_start;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr, length;
+
+  if (argaddr(0, &addr) < 0 || argaddr(1, &length)) {
+    return -1;
+  }
+
+  // assert addr is start or `addr + length' is the end
+
+  return -1;
+}
