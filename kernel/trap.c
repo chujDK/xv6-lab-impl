@@ -13,7 +13,6 @@ struct spinlock tickslock;
 uint ticks;
 
 extern char trampoline[], uservec[], userret[];
-extern struct mmapVMA mmapVMAs[MAX_MMAP_VMA];
 
 // in kernelvec.S, calls kerneltrap().
 void kernelvec();
@@ -43,7 +42,7 @@ alloc_mmaped_page(struct proc* p, int is_write) {
   for (int i = 0; i < MAX_MMAP_VMA; i++) {
     if (mmapVMAs[i].pid == p->pid) {
       if (addr >= mmapVMAs[i].vaddr_start &&
-          addr <= mmapVMAs[i].vaddr_start + mmapVMAs[i].length) {
+          addr < mmapVMAs[i].vaddr_start + mmapVMAs[i].length) {
         if (is_write && mmapVMAs[i].writeable == 1) {
           in_mmap_addr = 1;
           mmap_vma = &mmapVMAs[i];
@@ -88,11 +87,12 @@ alloc_mmaped_page(struct proc* p, int is_write) {
 
     uint offset = addr - mmap_vma->vaddr_start;
     struct inode* ip = mmap_vma->file->ip;
-    idup(ip);
+    begin_op();
     ilock(ip);
     uint64 end = readi(ip, 0, (uint64)new_page, offset, PGSIZE);
     memset(new_page + end, 0, PGSIZE - end);
-    iunlockput(ip);
+    iunlock(ip);
+    end_op();
     
     mappages(p->pagetable, addr, PGSIZE, (uint64)new_page, new_flags);
   }

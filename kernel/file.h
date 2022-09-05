@@ -6,9 +6,14 @@ struct mmapVMA {
   int shared;
 
   uint64 vaddr_start;
+  uint64 mapping_start;
   uint64 length;
   int pid;
 };
+
+extern struct mmapVMA mmapVMAs[];
+uint64 munmap_internal(uint64, uint64);
+struct mmapVMA* alloc_mmap_vma();
 
 struct file {
   enum { FD_NONE, FD_PIPE, FD_INODE, FD_DEVICE } type;

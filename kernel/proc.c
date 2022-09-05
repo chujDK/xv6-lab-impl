@@ -5,6 +5,9 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fs.h"
+#include "sleeplock.h"
+#include "file.h"
 
 struct cpu cpus[NCPU];
 
@@ -157,6 +160,7 @@ freeproc(struct proc *p)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
   p->sz = 0;
+  p->mmaped_sz = 0;
   p->pid = 0;
   p->parent = 0;
   p->name[0] = 0;
@@ -289,6 +293,24 @@ fork(void)
   }
   np->sz = p->sz;
 
+  // Copy parent mmaped VMA to child.
+  np->mmaped_sz = p->mmaped_sz;
+  for (int i = 0; i < MAX_MMAP_VMA; i++) {
+    if (mmapVMAs[i].pid == p->pid) {
+      struct mmapVMA* vma = alloc_mmap_vma();
+      vma->pid = np->pid;
+
+      filedup(mmapVMAs[i].file);
+      vma->file = mmapVMAs[i].file;
+      vma->writeable = mmapVMAs[i].writeable;
+      vma->readable = mmapVMAs[i].readable;
+      vma->shared = mmapVMAs[i].shared;
+      vma->vaddr_start = mmapVMAs[i].vaddr_start;
+      vma->mapping_start = mmapVMAs[i].mapping_start;
+      vma->length = mmapVMAs[i].length;
+    }
+  }
+
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
 
@@ -343,6 +365,9 @@ exit(int status)
 
   if(p == initproc)
     panic("init exiting");
+
+  // Unmap all mapped regions
+  munmap_internal(p->sz, p->mmaped_sz);
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){

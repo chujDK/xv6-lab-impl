@@ -532,13 +532,29 @@ sys_mmap(void)
   }
 
   struct proc* proc = myproc();
+  mmapVMAs[vma_idx].pid = proc->pid;
+
   acquire(&proc->lock);
   struct file* file = proc->ofile[fd];
   if (file == 0) {
+    mmapVMAs[vma_idx].pid = 0;
     return -1;
+  }
+  if (file->type != FD_INODE) {
+    mmapVMAs[vma_idx].pid = 0;
+    release(&proc->lock);
+    return -1;
+  }
+  if (prot & PROT_WRITE) {
+    if ((flags & MAP_SHARED) && !file->writable) {
+      mmapVMAs[vma_idx].pid = 0;
+      release(&proc->lock);
+      return -1;
+    }
   }
   filedup(file);
   release(&proc->lock);
+
 
   mmapVMAs[vma_idx].file = file;
   if (prot & PROT_READ) {
@@ -552,30 +568,123 @@ sys_mmap(void)
   }
 
   acquire(&proc->lock);
-  mmapVMAs[vma_idx].vaddr_start = proc->sz;
-  mmapVMAs[vma_idx].pid = proc->pid;
+  mmapVMAs[vma_idx].vaddr_start = proc->sz + proc->mmaped_sz;
+  mmapVMAs[vma_idx].mapping_start = proc->sz + proc->mmaped_sz;
   mmapVMAs[vma_idx].length = PGROUNDUP(length);
-  proc->sz = proc->sz + PGROUNDUP(length);
+  proc->mmaped_sz += PGROUNDUP(length);
   release(&proc->lock);
 
-/*
-  for (int a = mmapVMAs[vma_idx].vaddr_start; a < proc->sz; a += PGSIZE) {
-    if ((pte = walk(proc->pagetable, a, 1)) == 0) {
-      for (int failaddr = a;
-           a >= mmapVMAs[vma_idx].vaddr_start;
-           a -= PGSIZE) {
-        pte = walk(proc->pagetable, failaddr, 0);
-        *pte = 0;
-      }
-      return -1;
-    }
-    if (*pte & PTE_V) {
-      panic("mmap: page already exists!");
+  return mmapVMAs[vma_idx].vaddr_start;
+}
+
+static uint64
+max(uint64 a, uint64 b)
+{
+  return a > b ? a : b;
+}
+
+static uint64
+min(uint64 a, uint64 b)
+{
+  return a < b ? a : b;
+}
+
+struct mmapVMA*
+alloc_mmap_vma()
+{
+  for (int i = 0; i < MAX_MMAP_VMA; i++) {
+    if (mmapVMAs[i].pid == 0) {
+      return &mmapVMAs[i];
     }
   }
-  */
+  return 0;
+}
 
-  return mmapVMAs[vma_idx].vaddr_start;
+uint64
+munmap_onemapped(uint64 addr, uint64 length)
+{
+  pte_t* pte;
+
+  int in_mmap_addr = 0;
+  struct mmapVMA* mmap_vma = 0;
+  struct proc* p = myproc();
+
+  length = PGROUNDUP(length);
+
+  for (int i = 0; i < MAX_MMAP_VMA; i++) {
+    if (mmapVMAs[i].pid == p->pid) {
+      // assert addr is start or `addr + length' is the end
+      if (addr == mmapVMAs[i].vaddr_start ||
+          addr + length == mmapVMAs[i].vaddr_start + mmapVMAs[i].length) {
+        in_mmap_addr = 1;
+        mmap_vma = &mmapVMAs[i];
+        break;
+      }
+    }
+  }
+
+  if (!in_mmap_addr) {
+    return 0;
+  }
+
+  length = 
+    max(addr + length, mmap_vma->vaddr_start + mmap_vma->length) - addr;
+
+  if (mmap_vma->shared) {
+    for (int l = 0; l < length; l += PGSIZE) {
+      if ((pte = walk(p->pagetable, addr + l, 0)) == 0) {
+        continue;
+      }
+      if (PTE_FLAGS(*pte) & PTE_D) {
+        // write back to the disk
+        begin_op();
+        ilock(mmap_vma->file->ip);
+        writei(mmap_vma->file->ip, 0,
+          walkaddr(p->pagetable, addr + l),
+          addr + l - mmap_vma->vaddr_start, PGSIZE);
+        iunlock(mmap_vma->file->ip);
+        end_op();
+      }
+    }
+  }
+
+  if (addr == mmap_vma->vaddr_start) {
+    mmap_vma->vaddr_start = addr + length;
+  }
+
+  mmap_vma->length -= length;
+
+  if (mmap_vma->length == 0) {
+    fileclose(mmap_vma->file);
+    memset(mmap_vma, 0, sizeof(struct mmapVMA));
+  }
+
+  for (int l = 0; l < length; l += PGSIZE) {
+    if (walkaddr(p->pagetable, addr + l)) {
+      uvmunmap(p->pagetable, addr + l, 1, 1);
+    }
+  }
+
+  return 0;
+
+}
+
+uint64
+munmap_internal(uint64 start, uint64 length)
+{
+  struct proc *p = myproc();
+  for (int i = 0; i < MAX_MMAP_VMA; i++) {
+    if (mmapVMAs[i].pid == p->pid) {
+      uint64 left = max(start, mmapVMAs[i].vaddr_start);
+      uint64 right = 
+        min(start + length, mmapVMAs[i].vaddr_start + mmapVMAs[i].length);
+      if (left < right) {
+        munmap_onemapped(left, right - left);
+      }
+    }
+  }
+
+  return 0;
 }
 
 uint64
@@ -587,7 +696,5 @@ sys_munmap(void)
     return -1;
   }
 
-  // assert addr is start or `addr + length' is the end
-
-  return -1;
+  return munmap_internal(addr, length);
 }
